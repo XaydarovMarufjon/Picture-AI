@@ -1,6 +1,6 @@
 generator client {
   provider = "prisma-client-js"
-  output   = "../generated/prisma"
+  // output   = "../generated/prisma"
 }
 
 datasource db {
@@ -8,10 +8,24 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model ScanResult {
-  id        Int      @id @default(autoincrement())
+model Scan {
+  id        Int        @id @default(autoincrement())
   siteUrl   String
+  status    String     @default("finished") // finished | error
+  progress  Int?       @default(0) // 0% -> 100%
+  createdAt DateTime   @default(now())
+  items     ScanItem[]
+}
+
+model ScanItem {
+  id        Int      @id @default(autoincrement())
+  scanId    Int
   imageUrl  String
-  result    String
+  provider  String // yangi ustun (huggingface yoki sightengine)
+  label     String
+  score     Float?
+  raw       Json
   createdAt DateTime @default(now())
+
+  scan Scan @relation(fields: [scanId], references: [id])
 }
