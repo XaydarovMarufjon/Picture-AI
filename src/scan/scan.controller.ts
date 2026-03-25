@@ -1,10 +1,10 @@
-import { Controller, Get, Post, Body, Query, ParseIntPipe } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, ParseIntPipe, Param } from '@nestjs/common';
 import { ScanService } from './scan.service';
 import { StartScanDto } from './dto/start-scan.dto';
 
 @Controller('scan')
 export class ScanController {
-  constructor(private service: ScanService) {}
+  constructor(private service: ScanService) { }
 
   @Post()
   async start(@Body() dto: StartScanDto) {
@@ -25,4 +25,10 @@ export class ScanController {
   async detail(@Query('id', ParseIntPipe) id: number) {
     return this.service.getScan(id);
   }
+
+  @Get(':id/progress')
+  getProgress(@Param('id') id: number) {
+    return this.service.getProgress(Number(id));
+  }
+
 }

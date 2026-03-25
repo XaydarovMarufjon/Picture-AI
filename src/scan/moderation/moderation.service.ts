@@ -1,5 +1,3 @@
-
-
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HuggingFaceModerator } from './moderators/huggingface.moderator';
@@ -11,16 +9,18 @@ export class ModerationService {
   private moderators: IModerator[] = [];
 
   constructor(private config: ConfigService) {
-    // HuggingFace
     const hfToken = this.config.get<string>('HF_TOKEN');
-    const hfModel = this.config.get<string>('HF_MODEL') || 'Falconsai/nsfw_image_detection';
+    const hfModel =
+      this.config.get<string>('HF_MODEL') ||
+      'Falconsai/nsfw_image_detection';
+
     if (hfToken) {
       this.moderators.push(new HuggingFaceModerator(hfToken, hfModel));
     }
 
-    // Sightengine
     const seUser = this.config.get<string>('SIGHTENGINE_USER');
     const seSecret = this.config.get<string>('SIGHTENGINE_SECRET');
+
     if (seUser && seSecret) {
       this.moderators.push(new SightengineModerator(seUser, seSecret));
     }
@@ -30,7 +30,19 @@ export class ModerationService {
     }
   }
 
+  // URL orqali tekshirish
   async checkAll(imageUrl: string): Promise<ModerationResult[]> {
-    return Promise.all(this.moderators.map(m => m.check(imageUrl)));
+    return Promise.all(this.moderators.map((m) => m.check(imageUrl)));
+  }
+
+  // BUFFER orqali tekshirish (SVG → PNG)
+  async checkBuffer(buffer: Buffer): Promise<ModerationResult[]> {
+    const supported = this.moderators.filter((m) => m.checkBuffer);
+
+    if (supported.length === 0) {
+      throw new Error('Buffer bilan ishlaydigan moderation provider yo‘q');
+    }
+
+    return Promise.all(supported.map((m) => m.checkBuffer!(buffer)));
   }
 }

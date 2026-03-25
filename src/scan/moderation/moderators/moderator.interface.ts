@@ -7,4 +7,6 @@ export interface ModerationResult {
 
 export interface IModerator {
   check(imageUrl: string): Promise<ModerationResult>;
+  checkBuffer?(buffer: Buffer): Promise<ModerationResult>;
+
 }
