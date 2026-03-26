@@ -1,8 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { CrawlerService } from './crawler.service';
 import { ModerationService } from './moderation/moderation.service';
-import pLimit from 'p-limit';
 import { PrismaService } from 'src/prisma/prisma.service';
+import pLimit from 'p-limit';
+import axios from 'axios';
+import crypto from 'crypto';
 
 @Injectable()
 export class ScanService {
@@ -14,140 +16,47 @@ export class ScanService {
     private prisma: PrismaService,
   ) {}
 
-  // ------------------ HELPERS ------------------
-
-  private isUzDomain(url: string) {
-    try {
-      const u = new URL(url);
-      return u.hostname.endsWith('.uz');
-    } catch {
-      return false;
-    }
-  }
-
-  private isFont(url: string) {
-    return /\.(woff|woff2|ttf|otf)$/i.test(url);
-  }
-
-  private isSvg(url: string) {
-    return url.toLowerCase().endsWith('.svg');
-  }
-
-  private isBitmap(url: string) {
-    return /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(url);
-  }
-
-private async svgToPng(svgUrl: string): Promise<Buffer> {
-  const puppeteer = (await import('puppeteer')).default;
-
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--ignore-certificate-errors'],
-  } as any); // 👈 TYPE FIX
-
-  const page = await browser.newPage();
-  await page.goto(svgUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-
-  const shot = await page.screenshot({ fullPage: true });
-
-  await browser.close();
-
-  // 👇 Uint8Array → Buffer
-  return Buffer.from(shot as Uint8Array);
-}
-
-
-  // ------------------ MAIN SCAN ------------------
-
   async scan(url: string) {
-    if (!this.isUzDomain(url)) {
-      throw new Error('Faqat .uz domenlarni skan qilishga ruxsat berilgan');
-    }
+    // 1. crawl
+    const raw = await this.crawler.extractImageUrls(url);
+    this.logger.log(`RAW: ${raw.length}`);
 
-    // 1. Barcha rasmlarni yig‘ish
-    const images = await this.crawler.extractImageUrls(url);
-    this.logger.log(`${images.length} ta fayl topildi: ${url}`);
+    // 2. filter
+    const filtered = await this.filter(raw);
+    this.logger.log(`FILTERED: ${filtered.length}`);
 
-    // 2. Scan yozuvini yaratish
+    // 3. dedup
+    const unique = await this.dedup(filtered);
+    this.logger.log(`UNIQUE: ${unique.length}`);
+
+    // 4. top 500
+    const top = this.rank(raw).slice(0, 500);
+
+    // 5. create scan
     const scan = await this.prisma.scan.create({
-      data: { siteUrl: url, status: 'running',  progress: images.length,
- },
+      data: {
+        siteUrl: url,
+        status: 'running',
+        progress: top.length,
+      },
     });
 
-    // 3. Parallel moderatsiya
-    const limit = pLimit(3);
+    // 6. moderation
+    const results = await this.moderate(top);
 
-    const results = await Promise.all(
-      images.map((img) =>
-        limit(async () => {
-          try {
-            // ❌ FONT
-            if (this.isFont(img)) return [];
+    // 7. batch save
+    await this.prisma.scanItem.createMany({
+      data: results.map(r => ({
+        scanId: scan.id,
+        imageUrl: r.url,
+        provider: r.provider,
+        label: r.label,
+        score: r.score ?? null,
+        raw: r.raw ?? {},
+      })),
+    });
 
-            // 🟢 SVG
-            if (this.isSvg(img)) {
-              const png = await this.svgToPng(img);
-              const checks = await this.mod.checkBuffer(png);
-
-              return Promise.all(
-                checks.map((r) =>
-                  this.prisma.scanItem.create({
-                    data: {
-                      scanId: scan.id,
-                      imageUrl: img,
-                      provider: r.provider,
-                      label: r.label,
-                      score: r.score ?? null,
-                      raw: r.raw ?? {},
-                    },
-                  }),
-                ),
-              );
-            }
-
-            // 🟢 BITMAP
-            if (this.isBitmap(img)) {
-              const checks = await this.mod.checkAll(img);
-
-              return Promise.all(
-                checks.map((r) =>
-                  this.prisma.scanItem.create({
-                    data: {
-                      scanId: scan.id,
-                      imageUrl: img,
-                      provider: r.provider,
-                      label: r.label,
-                      score: r.score ?? null,
-                      raw: r.raw ?? {},
-                    },
-                  }),
-                ),
-              );
-            }
-
-            // ❌ boshqa formatlar
-            return [];
-          } catch (e: any) {
-            this.logger.warn(`Moderation error for ${img}: ${e?.message || e}`);
-
-            return [
-              await this.prisma.scanItem.create({
-                data: {
-                  scanId: scan.id,
-                  imageUrl: img,
-                  provider: 'error',
-                  label: 'error',
-                  score: null,
-                  raw: { error: e?.message || 'unknown' },
-                },
-              }),
-            ];
-          }
-        }),
-      ),
-    );
-
-    // 4. Yakunlash
+    // 8. finish
     await this.prisma.scan.update({
       where: { id: scan.id },
       data: { status: 'finished' },
@@ -155,51 +64,196 @@ private async svgToPng(svgUrl: string): Promise<Buffer> {
 
     return {
       scanId: scan.id,
-      siteUrl: url,
-      totalFiles: images.length,
-      savedItems: results.flat().length,
+      total: raw.length,
+      processed: top.length,
+      saved: results.length,
     };
   }
 
-  // ------------------ QUERIES ------------------
+  // ---------------- FILTER ----------------
+private async filter(urls: string[]) {
+  const limit = pLimit(5);
 
-  async getScan(scanId: number) {
-    return this.prisma.scan.findUnique({
-      where: { id: scanId },
-      include: { items: { orderBy: { createdAt: 'desc' } } },
-    });
+  const results = await Promise.all(
+    urls.map(url =>
+      limit(async () => {
+        if (!url.startsWith('http')) return null;
+
+        if (
+          url.includes('logo') ||
+          url.includes('icon') ||
+          url.includes('avatar') ||
+          url.includes('sprite') ||
+          url.endsWith('.svg')
+        ) return null;
+
+        try {
+          const head = await axios.head(url, { timeout: 5000 });
+          const size = Number(head.headers['content-length'] || 0);
+
+          if (size < 5 * 1024) return null;
+
+          return url;
+        } catch {
+          return null;
+        }
+      }),
+    ),
+  );
+
+  return results.filter(Boolean) as string[];
+}
+
+  // ---------------- DEDUP ----------------
+
+  private async dedup(urls: string[]) {
+    const map = new Map<string, string>();
+
+    for (const url of urls) {
+      try {
+        const res = await axios.get(url, {
+          responseType: 'arraybuffer',
+          timeout: 8000,
+        });
+
+        const hash = crypto
+          .createHash('md5')
+          .update(res.data)
+          .digest('hex');
+
+        if (!map.has(hash)) {
+          map.set(hash, url);
+        }
+      } catch {}
+    }
+
+    return Array.from(map.values());
   }
 
-  async latest(limit = 50) {
+  // ---------------- RANK ----------------
+
+  private rank(urls: string[]) {
+    return urls
+      .map(u => ({
+        url: u,
+        score: this.score(u),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map(x => x.url);
+  }
+
+  private score(url: string) {
+    let s = 0;
+
+    if (url.includes('product')) s += 3;
+    if (url.includes('news')) s += 2;
+    if (url.includes('banner')) s += 1;
+
+    if (url.includes('logo')) s -= 5;
+
+    return s;
+  }
+
+  // ---------------- MODERATION ----------------
+
+//   private async moderate(urls: string[]) {
+//   const limit = pLimit(3);
+
+//   const results = await Promise.all(
+//     urls.map(url =>
+//       limit(async () => {
+//         try {
+//           const checks = await this.mod.checkSmart(url);
+
+//           return checks
+//             .filter(r => (r.score ?? 0) > 0)
+//             .map(r => ({
+//               url,
+//               provider: r.provider,
+//               label: r.label,
+//               score: r.score,
+//               raw: r.raw,
+
+              
+//             } 
+//           ));
+            
+
+//         } catch {
+//           return [];
+//         }
+//       }),
+//     ),
+//   );
+
+//   return results.flat();
+// }
+
+
+private async moderate(urls: string[]) {
+  const limit = pLimit(3);
+
+  const results = await Promise.all(
+    urls.map(url =>
+      limit(async () => {
+        try {
+          const checks = await this.mod.checkSmart(url);
+
+          return checks.map(r => ({
+            url,
+            provider: r.provider,
+            label: r.label,
+            score: r.score,
+            raw: r.raw,
+          }));
+
+        } catch {
+          return [];
+        }
+      }),
+    ),
+  );
+
+  return results.flat();
+}
+
+
+  // ---------------- QUERIES ----------------
+
+  latest(limit = 500) {
     return this.prisma.scan.findMany({
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
   }
 
-  async searchBySite(siteUrl: string) {
+  searchBySite(siteUrl: string) {
     return this.prisma.scan.findMany({
       where: { siteUrl },
       orderBy: { createdAt: 'desc' },
-      take: 5,
       include: { items: true },
     });
   }
 
-  async getProgress(scanId: number) {
-  const scan = await this.prisma.scan.findUnique({
-    where: { id: scanId },
-    include: { items: true },
-  });
+  getScan(id: number) {
+    return this.prisma.scan.findUnique({
+      where: { id },
+      include: { items: true },
+    });
+  }
 
-  if (!scan) return null;
+  async getProgress(id: number) {
+    const scan = await this.prisma.scan.findUnique({
+      where: { id },
+      include: { items: true },
+    });
 
-  return {
-    status: scan.status,
-    total: scan.progress,
-    done: scan.items.length,
-    items: scan.items
-  };
-}
+    if (!scan) return null;
 
+    return {
+      status: scan.status,
+      total: scan.progress,
+      done: scan.items.length,
+    };
+  }
 }

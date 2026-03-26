@@ -7,29 +7,39 @@ export class SightengineModerator implements IModerator {
     private apiSecret: string,
   ) {}
 
-  async check(imageUrl: string): Promise<ModerationResult> {
-    const { data } = await axios.get('https://api.sightengine.com/1.0/check.json', {
-      params: {
-        url: imageUrl,
-        models: 'nudity,wad,gore',
-        api_user: this.apiUser,
-        api_secret: this.apiSecret,
-      },
-      timeout: 20000,
-    });
+  async check(imageUrl: string): Promise<ModerationResult[]> {
+    try {
+      const { data } = await axios.get(
+        'https://api.sightengine.com/1.0/check.json',
+        {
+          params: {
+            url: imageUrl,
+            models: 'nudity,wad,gore',
+            api_user: this.apiUser,
+            api_secret: this.apiSecret,
+          },
+          timeout: 10000,
+        },
+      );
 
-    // Nudity modelida: raw/partial/safe qiymatlar bo‘ladi
-    const nudity = data?.nudity || data?.nudity2 || {};
-    // Pornografiya ehtimolini baholash
-    const pornScore = nudity.raw ?? nudity.sexual_activity ?? 0;
-    const safeScore = nudity.safe ?? 0;
-    const label = pornScore > 0.5 ? 'nsfw' : 'safe';
+      const nudity = data?.nudity || {};
+      const pornScore = nudity.raw ?? nudity.sexual_activity ?? 0;
 
-    return {
-      label,
-      score: pornScore || safeScore,
-      raw: data,
-      provider: 'sightengine'
-    };
+      const label = pornScore > 0.5 ? 'nsfw' : 'safe';
+
+      return [{
+        provider: 'sightengine',
+        label,
+        score: pornScore,
+        raw: data,
+      }];
+    } catch (e: any) {
+      return [{
+        provider: 'sightengine',
+        label: 'error',
+        score: null,
+        raw: { error: e?.message },
+      }];
+    }
   }
 }

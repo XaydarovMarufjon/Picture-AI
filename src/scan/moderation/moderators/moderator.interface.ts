@@ -1,4 +1,5 @@
 export interface ModerationResult {
+  
   provider: string;       // qaysi provider (huggingface | sightengine)
   label: string;          // AI chiqargan label
   score?: number | null;  // ishonchlilik balli
@@ -6,7 +7,7 @@ export interface ModerationResult {
 }
 
 export interface IModerator {
-  check(imageUrl: string): Promise<ModerationResult>;
-  checkBuffer?(buffer: Buffer): Promise<ModerationResult>;
+  check(imageUrl: string): Promise<ModerationResult[]>;
+  checkBuffer?(buffer: Buffer): Promise<ModerationResult[]>;
 
 }
