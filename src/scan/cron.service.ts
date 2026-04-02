@@ -8,6 +8,9 @@ export class CronService {
 
     private sites = [
         'https://csec.uz',
+        'https://president.uz',
+        'https://gov.uz',
+        'https://senat.uz',
         'https://xxx.uz',
         // 👉 keyin DBga ko‘chiramiz
     ];
