@@ -21,10 +21,11 @@ model ScanItem {
   id        Int      @id @default(autoincrement())
   scanId    Int
   imageUrl  String
+  hash      String   @unique
   provider  String // yangi ustun (huggingface yoki sightengine)
   label     String
   score     Float?
-  raw       Json
+  raw       Json?
   createdAt DateTime @default(now())
 
   scan Scan @relation(fields: [scanId], references: [id])

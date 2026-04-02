@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { CrawlerService } from './crawler.service';
 import { ModerationService } from './moderation/moderation.service';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { ScanGateway } from './scan.gateway';
+
 import pLimit from 'p-limit';
 import axios from 'axios';
 import crypto from 'crypto';
@@ -14,25 +16,45 @@ export class ScanService {
     private crawler: CrawlerService,
     private mod: ModerationService,
     private prisma: PrismaService,
-  ) {}
+    private gateway: ScanGateway,
+  ) { }
 
+  // ================= MAIN =================
   async scan(url: string) {
-    // 1. crawl
+    this.gateway.sendProgress({ stage: 'start', url });
+
+    // 1️⃣ crawl
     const raw = await this.crawler.extractImageUrls(url);
     this.logger.log(`RAW: ${raw.length}`);
 
-    // 2. filter
+    this.gateway.sendProgress({
+      stage: 'crawl',
+      count: raw.length,
+    });
+    this.logger.log(`RAW: ${raw.length}`);
+
+    // 2️⃣ filter
     const filtered = await this.filter(raw);
+
+    this.gateway.sendProgress({
+      stage: 'filter',
+      count: filtered.length,
+    });
     this.logger.log(`FILTERED: ${filtered.length}`);
 
-    // 3. dedup
-    const unique = await this.dedup(filtered);
-    this.logger.log(`UNIQUE: ${unique.length}`);
+    // 3️⃣ dedup (hash)
+    const deduped = await this.dedupWithHash(filtered);
 
-    // 4. top 500
-    const top = this.rank(raw).slice(0, 500);
+    this.gateway.sendProgress({
+      stage: 'dedup',
+      count: deduped.length,
+    });
+    this.logger.log(`DEDUPED: ${deduped.length}`);
 
-    // 5. create scan
+    // 4️⃣ rank
+    const top = this.rank(deduped).slice(0, 200);
+
+    // 5️⃣ create scan
     const scan = await this.prisma.scan.create({
       data: {
         siteUrl: url,
@@ -41,25 +63,21 @@ export class ScanService {
       },
     });
 
-    // 6. moderation
+    // 6️⃣ moderation
     const results = await this.moderate(top);
 
-    // 7. batch save
-    await this.prisma.scanItem.createMany({
-      data: results.map(r => ({
-        scanId: scan.id,
-        imageUrl: r.url,
-        provider: r.provider,
-        label: r.label,
-        score: r.score ?? null,
-        raw: r.raw ?? {},
-      })),
-    });
+    // 7️⃣ save
+    await this.saveResults(results, scan.id);
 
-    // 8. finish
+    // 8️⃣ finish
     await this.prisma.scan.update({
       where: { id: scan.id },
       data: { status: 'finished' },
+    });
+
+    this.gateway.sendProgress({
+      stage: 'finished',
+      scanId: scan.id,
     });
 
     return {
@@ -70,68 +88,71 @@ export class ScanService {
     };
   }
 
-  // ---------------- FILTER ----------------
-private async filter(urls: string[]) {
-  const limit = pLimit(5);
+  // ================= FILTER =================
+  private async filter(urls: string[]) {
+    const limit = pLimit(5);
 
-  const results = await Promise.all(
-    urls.map(url =>
-      limit(async () => {
-        if (!url.startsWith('http')) return null;
+    const results = await Promise.all(
+      urls.map(url =>
+        limit(async () => {
+          if (!url.startsWith('http')) return null;
 
-        if (
-          url.includes('logo') ||
-          url.includes('icon') ||
-          url.includes('avatar') ||
-          url.includes('sprite') ||
-          url.endsWith('.svg')
-        ) return null;
+          if (
+            url.includes('logo') ||
+            url.includes('icon') ||
+            url.includes('avatar') ||
+            url.includes('sprite') ||
+            url.endsWith('.svg')
+          ) return null;
 
-        try {
-          const head = await axios.head(url, { timeout: 5000 });
-          const size = Number(head.headers['content-length'] || 0);
+          try {
+            const head = await axios.head(url, { timeout: 5000 });
+            const size = Number(head.headers['content-length'] || 0);
 
-          if (size < 5 * 1024) return null;
+            if (size < 5 * 1024) return null;
 
-          return url;
-        } catch {
-          return null;
-        }
-      }),
-    ),
-  );
+            return url;
+          } catch {
+            return null;
+          }
+        }),
+      ),
+    );
 
-  return results.filter(Boolean) as string[];
-}
+    return results.filter(Boolean) as string[];
+  }
 
-  // ---------------- DEDUP ----------------
-
-  private async dedup(urls: string[]) {
+  // ================= DEDUP + HASH =================
+  private async dedupWithHash(urls: string[]) {
     const map = new Map<string, string>();
+    const limit = pLimit(5);
 
-    for (const url of urls) {
-      try {
-        const res = await axios.get(url, {
-          responseType: 'arraybuffer',
-          timeout: 8000,
-        });
+    await Promise.all(
+      urls.map(url =>
+        limit(async () => {
+          try {
+            const res = await axios.get(url, {
+              responseType: 'arraybuffer',
+              timeout: 8000,
+            });
 
-        const hash = crypto
-          .createHash('md5')
-          .update(res.data)
-          .digest('hex');
+            const hash = crypto
+              .createHash('md5')
+              .update(res.data)
+              .digest('hex');
 
-        if (!map.has(hash)) {
-          map.set(hash, url);
-        }
-      } catch {}
-    }
+            if (!map.has(hash)) {
+              map.set(hash, url);
+            }
+          } catch { }
+        }),
+      ),
+    );
 
     return Array.from(map.values());
   }
 
-  // ---------------- RANK ----------------
-
+  // ================= RANK =================
   private rank(urls: string[]) {
     return urls
       .map(u => ({
@@ -148,79 +169,106 @@ private async filter(urls: string[]) {
     if (url.includes('product')) s += 3;
     if (url.includes('news')) s += 2;
     if (url.includes('banner')) s += 1;
-
     if (url.includes('logo')) s -= 5;
 
     return s;
   }
 
-  // ---------------- MODERATION ----------------
+  // ================= MODERATION =================
+  private async moderate(urls: string[]) {
+    const limit = pLimit(3);
 
-//   private async moderate(urls: string[]) {
-//   const limit = pLimit(3);
+    let done = 0;
+    const total = urls.length;
 
-//   const results = await Promise.all(
-//     urls.map(url =>
-//       limit(async () => {
-//         try {
-//           const checks = await this.mod.checkSmart(url);
+    const results = await Promise.all(
+      urls.map(url =>
+        limit(async () => {
+          try {
+            const checks = await this.mod.checkSmart(url);
 
-//           return checks
-//             .filter(r => (r.score ?? 0) > 0)
-//             .map(r => ({
-//               url,
-//               provider: r.provider,
-//               label: r.label,
-//               score: r.score,
-//               raw: r.raw,
+            done++;
 
-              
-//             } 
-//           ));
-            
+            if (done % 5 === 0) {
+              this.gateway.sendProgress({
+                stage: 'moderation',
+                done,
+                total,
+                progress: Math.round((done / total) * 100),
+              });
+            }
 
-//         } catch {
-//           return [];
-//         }
-//       }),
-//     ),
-//   );
+            return checks.map(r => ({
+              url,
+              provider: r.provider,
+              label: r.label,
+              score: r.score,
+              raw: r.raw,
+            }));
 
-//   return results.flat();
-// }
+          } catch {
+            return [];
+          }
+        }),
+      ),
+    );
 
+    return results.flat();
+  }
 
-private async moderate(urls: string[]) {
-  const limit = pLimit(3);
+  // ================= SAVE =================
+  private async saveResults(results: any[], scanId: number) {
+    const limit = pLimit(5);
 
-  const results = await Promise.all(
-    urls.map(url =>
-      limit(async () => {
-        try {
-          const checks = await this.mod.checkSmart(url);
+    await Promise.all(
+      results.map(r =>
+        limit(async () => {
+          const hash = await this.getHash(r.url);
+          if (!hash) return;
 
-          return checks.map(r => ({
-            url,
-            provider: r.provider,
-            label: r.label,
-            score: r.score,
-            raw: r.raw,
-          }));
+          await this.prisma.scanItem.upsert({
+            where: { hash },
+            update: {
+              createdAt: new Date(),
+              label: r.label,
+              score: r.score ?? null,
+              raw: r.raw ?? {},
+            },
+            create: {
+              scanId,
+              imageUrl: r.url,
+              hash,
+              provider: r.provider,
+              label: r.label,
+              score: r.score ?? null,
+              raw: r.raw ?? {},
+              createdAt: new Date(),
+            },
+          });
+        }),
+      ),
+    );
+  }
 
-        } catch {
-          return [];
-        }
-      }),
-    ),
-  );
+  private async getHash(url: string): Promise<string | null> {
+    try {
+      const res = await axios.get(url, {
+        responseType: 'arraybuffer',
+        timeout: 8000,
+      });
 
-  return results.flat();
-}
+      return crypto
+        .createHash('md5')
+        .update(res.data)
+        .digest('hex');
+    } catch {
+      return null;
+    }
+  }
 
+  // ================= EXTRA =================
 
-  // ---------------- QUERIES ----------------
-
-  latest(limit = 500) {
+  latest(limit = 100) {
     return this.prisma.scan.findMany({
       orderBy: { createdAt: 'desc' },
       take: limit,
@@ -231,13 +279,6 @@ private async moderate(urls: string[]) {
     return this.prisma.scan.findMany({
       where: { siteUrl },
       orderBy: { createdAt: 'desc' },
-      include: { items: true },
-    });
-  }
-
-  getScan(id: number) {
-    return this.prisma.scan.findUnique({
-      where: { id },
       include: { items: true },
     });
   }
@@ -256,4 +297,12 @@ private async moderate(urls: string[]) {
       done: scan.items.length,
     };
   }
+
+  getScan(id: number) {
+    return this.prisma.scan.findUnique({
+      where: { id },
+      include: { items: true },
+    });
+  }
 }
+

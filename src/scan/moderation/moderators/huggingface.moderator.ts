@@ -8,59 +8,99 @@ export class HuggingFaceModerator implements IModerator {
   ) {}
 
   async check(imageUrl: string): Promise<ModerationResult[]> {
-    return this.retry(async () => {
+    try {
+      // 🔥 1. URL bilan urinib ko‘ramiz
+      const urlResult = await this.tryUrl(imageUrl);
+      if (urlResult) return urlResult;
+
+      // 🔥 2. fallback → buffer
+      const bufferResult = await this.tryBuffer(imageUrl);
+      if (bufferResult) return bufferResult;
+
+      throw new Error('HF failed both URL and buffer');
+
+    } catch (e: any) {
+      return [{
+        provider: 'huggingface',
+        label: 'error',
+        score: null,
+        raw: { error: e.message },
+      }];
+    }
+  }
+
+  // 🔹 URL METHOD
+  private async tryUrl(imageUrl: string): Promise<ModerationResult[] | null> {
+    try {
       const { data } = await axios.post(
         `https://api-inference.huggingface.co/models/${this.model}`,
-        { inputs: imageUrl }, // 🔥 URL BASED
+        { inputs: imageUrl },
         {
           headers: {
             Authorization: `Bearer ${this.token}`,
+          },
+          timeout: 10000,
+        },
+      );
+
+      return this.parse(data);
+
+    } catch {
+      return null;
+    }
+  }
+
+  // 🔹 BUFFER METHOD
+  private async tryBuffer(imageUrl: string): Promise<ModerationResult[] | null> {
+    try {
+      const img = await axios.get(imageUrl, {
+        responseType: 'arraybuffer',
+        timeout: 10000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+        },
+      });
+
+      const { data } = await axios.post(
+        `https://api-inference.huggingface.co/models/${this.model}`,
+        img.data,
+        {
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            'Content-Type': img.headers['content-type'] || 'image/jpeg',
           },
           timeout: 15000,
         },
       );
 
-      const arr = Array.isArray(data) ? data : [];
-      const first = Array.isArray(arr[0]) ? arr[0] : arr;
+      return this.parse(data);
 
-      let top = { label: 'unknown', score: 0 };
-
-      for (const it of first) {
-        if (it?.score > top.score) top = it;
-      }
-
-      const nsfwLabels = ['porn', 'hentai', 'sexy', 'nsfw', 'erotica'];
-      const label = nsfwLabels.includes(top.label) ? 'porn' : 'safe';
-
-      return [{
-        provider: 'huggingface',
-        label,
-        score: top.score,
-        raw: data,
-      }];
-    });
+    } catch {
+      return null;
+    }
   }
 
-  private async retry(fn: () => Promise<ModerationResult[]>, retries = 2) {
-    for (let i = 0; i <= retries; i++) {
-      try {
-        return await Promise.race([
-          fn(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('timeout')), 15000),
-          ),
-        ]);
-      } catch (e) {
-        if (i === retries) {
-          return [{
-            provider: 'huggingface',
-            label: 'error',
-            score: null,
-            raw: { error: (e as any)?.message },
-          }];
-        }
+  // 🔹 PARSER (ENG MUHIM)
+  private parse(data: any): ModerationResult[] {
+    const arr = Array.isArray(data) ? data : [];
+    const first = Array.isArray(arr[0]) ? arr[0] : arr;
+
+    let top = { label: 'unknown', score: 0 };
+
+    for (const it of first) {
+      if (it?.score > top.score) {
+        top = it;
       }
     }
-    return [];
+
+    const nsfwLabels = ['porn', 'hentai', 'sexy', 'nsfw', 'erotica'];
+    const label = nsfwLabels.includes(top.label) ? 'nsfw' : 'safe';
+
+    return [{
+      provider: 'huggingface',
+      label,
+      score: top.score,
+      raw: data,
+    }];
   }
 }
