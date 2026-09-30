@@ -18,21 +18,24 @@ export class HuggingFaceModerator implements IModerator {
       if (bufferResult) return bufferResult;
 
       throw new Error('HF failed both URL and buffer');
-
-    } catch (e: any) {
-      return [{
-        provider: 'huggingface',
-        label: 'error',
-        score: null,
-        raw: { error: e.message },
-      }];
+    } catch (e: unknown) {
+      return [
+        {
+          provider: 'huggingface',
+          label: 'error',
+          score: null,
+          raw: {
+            error: e instanceof Error ? e.message : 'HF moderation failed',
+          },
+        },
+      ];
     }
   }
 
   // 🔹 URL METHOD
   private async tryUrl(imageUrl: string): Promise<ModerationResult[] | null> {
     try {
-      const { data } = await axios.post(
+      const { data } = await axios.post<unknown>(
         `https://api-inference.huggingface.co/models/${this.model}`,
         { inputs: imageUrl },
         {
@@ -44,16 +47,17 @@ export class HuggingFaceModerator implements IModerator {
       );
 
       return this.parse(data);
-
     } catch {
       return null;
     }
   }
 
   // 🔹 BUFFER METHOD
-  private async tryBuffer(imageUrl: string): Promise<ModerationResult[] | null> {
+  private async tryBuffer(
+    imageUrl: string,
+  ): Promise<ModerationResult[] | null> {
     try {
-      const img = await axios.get(imageUrl, {
+      const img = await axios.get<ArrayBuffer>(imageUrl, {
         responseType: 'arraybuffer',
         timeout: 10000,
         headers: {
@@ -61,46 +65,85 @@ export class HuggingFaceModerator implements IModerator {
         },
       });
 
-      const { data } = await axios.post(
+      const { data } = await axios.post<unknown>(
         `https://api-inference.huggingface.co/models/${this.model}`,
         img.data,
         {
           headers: {
             Authorization: `Bearer ${this.token}`,
-            'Content-Type': img.headers['content-type'] || 'image/jpeg',
+            'Content-Type':
+              typeof img.headers['content-type'] === 'string'
+                ? img.headers['content-type']
+                : 'image/jpeg',
           },
           timeout: 15000,
         },
       );
 
       return this.parse(data);
-
     } catch {
       return null;
     }
   }
 
-  // 🔹 PARSER (ENG MUHIM)
-  private parse(data: any): ModerationResult[] {
-    const arr = Array.isArray(data) ? data : [];
-    const first = Array.isArray(arr[0]) ? arr[0] : arr;
+  // Only classify validated predictions for the single requested image.
+  private parse(data: unknown): ModerationResult[] {
+    if (!Array.isArray(data) || data.length === 0) {
+      throw new Error('Invalid HF prediction response');
+    }
 
-    let top = { label: 'unknown', score: 0 };
-
-    for (const it of first) {
-      if (it?.score > top.score) {
-        top = it;
-      }
+    const predictions: unknown[] = Array.isArray(data[0]) ? data[0] : data;
+    if (
+      (Array.isArray(data[0]) && data.length !== 1) ||
+      predictions.length === 0
+    ) {
+      throw new Error('Expected predictions for one image');
     }
 
     const nsfwLabels = ['porn', 'hentai', 'sexy', 'nsfw', 'erotica'];
-    const label = nsfwLabels.includes(top.label) ? 'nsfw' : 'safe';
+    // Falconsai/nsfw_image_detection uses "normal" for its safe class.
+    const safeLabels = ['normal'];
+    let top: { label: string; score: number } | undefined;
 
-    return [{
-      provider: 'huggingface',
-      label,
-      score: top.score,
-      raw: data,
-    }];
+    for (const prediction of predictions) {
+      if (
+        typeof prediction !== 'object' ||
+        prediction === null ||
+        Array.isArray(prediction) ||
+        !('label' in prediction) ||
+        !('score' in prediction)
+      ) {
+        throw new Error('Invalid HF prediction');
+      }
+
+      const { label, score } = prediction;
+      if (
+        typeof label !== 'string' ||
+        (!nsfwLabels.includes(label) && !safeLabels.includes(label)) ||
+        typeof score !== 'number' ||
+        !Number.isFinite(score) ||
+        score < 0 ||
+        score > 1
+      ) {
+        throw new Error('Invalid HF prediction label or probability');
+      }
+
+      if (!top || score > top.score) {
+        top = { label, score };
+      }
+    }
+
+    if (!top || top.score === 0) {
+      throw new Error('HF response has no positive prediction');
+    }
+
+    return [
+      {
+        provider: 'huggingface',
+        label: nsfwLabels.includes(top.label) ? 'nsfw' : 'safe',
+        score: top.score,
+        raw: data,
+      },
+    ];
   }
 }
