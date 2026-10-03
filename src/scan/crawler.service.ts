@@ -128,7 +128,14 @@ export class CrawlerService {
         return Array.from(set);
       });
 
-      return urls.map(u => new URL(u, pageUrl).href);
+      return urls.flatMap((url) => {
+        try {
+          return [new URL(url, pageUrl).href];
+        } catch {
+          // A malformed candidate must not discard other images on the page.
+          return [];
+        }
+      });
 
     } catch {
       return [];
