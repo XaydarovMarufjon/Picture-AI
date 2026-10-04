@@ -105,12 +105,14 @@ export class ModerationService {
     const retries = 2;
 
     for (let i = 0; i <= retries; i++) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
       try {
         return await Promise.race([
           fn(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('timeout')), timeout),
-          ),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('timeout')), timeout);
+          }),
         ]);
       } catch (e: any) {
         this.logger.warn(
@@ -127,6 +129,8 @@ export class ModerationService {
             },
           ];
         }
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
       }
     }
 
