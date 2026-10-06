@@ -62,10 +62,18 @@ export class CrawlerService {
           timeout: 30000,
         });
 
-        const links = await page.evaluate(() =>
-          Array.from(document.querySelectorAll('a'))
-            .map(a => a.href)
-            .filter(h => h.startsWith(location.origin)),
+        const links = await page.evaluate(
+          (allowedOrigin: string) =>
+            Array.from(document.querySelectorAll('a'))
+              .map((a) => a.href)
+              .filter((h) => {
+                try {
+                  return new URL(h).origin === allowedOrigin;
+                } catch {
+                  return false;
+                }
+              }),
+          origin,
         );
 
         for (const l of links) {
