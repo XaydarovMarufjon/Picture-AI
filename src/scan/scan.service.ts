@@ -127,7 +127,7 @@ export class ScanService {
     const map = new Map<string, string>();
     const limit = pLimit(5);
 
-    await Promise.all(
+    const downloads = await Promise.all(
       urls.map(url =>
         limit(async () => {
           try {
@@ -141,13 +141,20 @@ export class ScanService {
               .update(res.data)
               .digest('hex');
 
-            if (!map.has(hash)) {
-              map.set(hash, url);
-            }
-          } catch { }
+            return { hash, url };
+          } catch {
+            return null;
+          }
         }),
       ),
     );
+
+    // Promise.all preserves input order, regardless of download completion order.
+    for (const download of downloads) {
+      if (download && !map.has(download.hash)) {
+        map.set(download.hash, download.url);
+      }
+    }
 
     return Array.from(map.values());
   }
