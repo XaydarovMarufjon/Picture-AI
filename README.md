@@ -50,11 +50,31 @@ $ npm run start:prod
 # unit tests
 $ npm run test
 
-# e2e tests
+# offline HTTP integration tests
 $ npm run test:e2e
 
 # test coverage
 $ npm run test:cov
+```
+
+The `test:e2e` command exercises real Nest HTTP routing, request validation,
+parameter parsing, response serialization, and service-error handling through
+`AppModule`. It installs the same global validation options as `src/main.ts` and
+closes the test application afterward.
+
+This is an offline HTTP integration suite, not a live end-to-end scan. The scan
+service is a typed mock; crawling, moderation, Prisma, scheduled scans, and the
+WebSocket gateway use explicit provider doubles. The scan and crawler service
+imports also have doubles so Jest does not load their ESM-only `p-limit`
+dependency. No database, browser download, provider credentials, or external
+requests are needed. Real scan orchestration, persistence, concurrency, provider
+responses, WebSocket events, CORS, and production startup are outside this suite's
+coverage.
+
+For a single non-watch run:
+
+```bash
+npm run test:e2e -- --runInBand
 ```
 
 ## Deployment
