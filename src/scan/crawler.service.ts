@@ -102,9 +102,10 @@ export class CrawlerService {
         document.querySelectorAll('img').forEach(img => {
           if (img.src) set.add(img.src);
 
+          // srcset URLs and descriptors are separated by ASCII whitespace.
           if (img.srcset) {
             img.srcset.split(',').forEach(x => {
-              const u = x.trim().split(' ')[0];
+              const u = x.trim().split(/[\t\n\f\r ]+/)[0];
               if (u) set.add(u);
             });
           }
@@ -114,7 +115,7 @@ export class CrawlerService {
           const ss = s.getAttribute('srcset');
           if (ss) {
             ss.split(',').forEach(x => {
-              const u = x.trim().split(' ')[0];
+              const u = x.trim().split(/[\t\n\f\r ]+/)[0];
               if (u) set.add(u);
             });
           }
