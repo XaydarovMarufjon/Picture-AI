@@ -4,42 +4,48 @@ import { ScanService } from './scan.service';
 
 @Injectable()
 export class CronService {
-    private readonly logger = new Logger(CronService.name);
+  private readonly logger = new Logger(CronService.name);
 
-    private sites = [
-        'https://csec.uz',
-        'https://president.uz',
-        'https://gov.uz',
-        'https://senat.uz',
-        'https://xxx.uz',
-        // 👉 keyin DBga ko‘chiramiz
-    ];
+  private sites = [
+    'https://csec.uz',
+    'https://president.uz',
+    'https://gov.uz',
+    'https://senat.uz',
+    'https://xxx.uz',
+    // 👉 keyin DBga ko‘chiramiz
+  ];
 
-    private running = false;
+  private running = false;
 
-    constructor(private scan: ScanService) { }
+  constructor(private scan: ScanService) {}
 
-    @Cron('0 */1 * * *')    /// 1 soat 
-    async handleScan() {
-        if (this.running) {
-            this.logger.warn('⚠️ Previous scan still running');
-            return;
-        }
-
-        this.running = true;
-        this.logger.log('🔄 Auto scan started');
-
-        try {
-            await Promise.all(
-                this.sites.map(site =>
-                    this.scan.scan(site).catch(e => {
-                        this.logger.error(`Error scanning ${site}: ${e.message}`);
-                    })
-                )
-            );
-        } finally {
-            this.running = false;
-            this.logger.log('✅ Auto scan finished');
-        }
+  @Cron('0 */1 * * *') /// 1 soat
+  async handleScan() {
+    if (this.running) {
+      this.logger.warn('⚠️ Previous scan still running');
+      return;
     }
+
+    this.running = true;
+    this.logger.log('🔄 Auto scan started');
+
+    try {
+      await Promise.all(
+        this.sites.map((site) =>
+          this.scan.scan(site).catch((error: unknown) => {
+            const message =
+              error instanceof Error
+                ? error.message
+                : typeof error === 'string'
+                  ? error
+                  : 'Unknown scan error';
+            this.logger.error(`Error scanning ${site}: ${message}`);
+          }),
+        ),
+      );
+    } finally {
+      this.running = false;
+      this.logger.log('✅ Auto scan finished');
+    }
+  }
 }
