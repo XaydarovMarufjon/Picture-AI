@@ -25,8 +25,20 @@ export class ScanController {
   }
 
   @Get('latest')
-  latest(@Query('limit') limit?: string) {
-    return this.service.latest(limit ? +limit : 500);
+  latest(@Query('limit') limit?: unknown) {
+    // Preserve the default and Prisma's zero/negative pagination semantics.
+    if (limit === undefined || limit === '') return this.service.latest(500);
+
+    if (typeof limit !== 'string') {
+      throw new BadRequestException('limit must be a safe integer');
+    }
+
+    const parsed = Number(limit);
+    if (!Number.isSafeInteger(parsed)) {
+      throw new BadRequestException('limit must be a safe integer');
+    }
+
+    return this.service.latest(parsed);
   }
 
   @Get()
