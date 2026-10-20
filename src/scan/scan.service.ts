@@ -109,7 +109,7 @@ export class ScanService {
             const head = await axios.head(url, { timeout: 5000 });
             const size = Number(head.headers['content-length'] || 0);
 
-            if (size < 5 * 1024) return null;
+            if (!Number.isFinite(size) || size < 5 * 1024) return null;
 
             return url;
           } catch {
