@@ -82,18 +82,25 @@ export class ModerationService {
       }
 
       return [];
-    } catch (e: any) {
-      this.logger.error(`Critical error: ${e.message}`);
+    } catch (e: unknown) {
+      const message = this.errorMessage(e);
+      this.logger.error(`Critical error: ${message}`);
 
       return [
         {
           provider: 'huggingface',
           label: 'error',
           score: null,
-          raw: { error: e.message },
+          raw: { error: message },
         },
       ];
     }
+  }
+
+  private errorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'string') return error;
+    return 'Unknown moderation error';
   }
 
   // 🔥 TIMEOUT + RETRY + LOG
@@ -112,10 +119,9 @@ export class ModerationService {
             setTimeout(() => reject(new Error('timeout')), timeout),
           ),
         ]);
-      } catch (e: any) {
-        this.logger.warn(
-          `${provider} failed (try ${i + 1}): ${e.message}`,
-        );
+      } catch (e: unknown) {
+        const message = this.errorMessage(e);
+        this.logger.warn(`${provider} failed (try ${i + 1}): ${message}`);
 
         if (i === retries) {
           return [
@@ -123,7 +129,7 @@ export class ModerationService {
               provider: provider.toLowerCase() as any,
               label: 'error',
               score: null,
-              raw: { error: e.message },
+              raw: { error: message },
             },
           ];
         }
